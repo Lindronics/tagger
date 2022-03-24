@@ -2,7 +2,7 @@ use std::{collections::HashSet, iter::FromIterator};
 
 use ansi_term::Colour::Yellow;
 use console::Term;
-use dialoguer::{theme::ColorfulTheme, Editor, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Editor, Input, Select};
 use git2::{DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag};
 use regex::Regex;
 use semver::{BuildMetadata, Prerelease, Version};
@@ -12,13 +12,6 @@ use substring::Substring;
 struct TagVersion<'a> {
     tag: Tag<'a>,
     version: Version,
-}
-
-#[derive(Debug, EnumIter)]
-enum VersionLevel {
-    Major = 0,
-    Minor = 1,
-    Patch = 2,
 }
 
 fn main() {
@@ -72,7 +65,7 @@ fn get_latest_tags(repo: &Repository) {
         .iter()
         .for_each(|t| println!(" {}", Yellow.paint(format!("v{}", &t.version.to_string()))));
 
-    let next_tag_proposal = get_next_tag(
+    let next_tag_proposal = get_next_tag_proposal(
         latest_release,
         current_branch_pre_tag.map(|v| &v.version),
         pre_tags,
@@ -80,33 +73,28 @@ fn get_latest_tags(repo: &Repository) {
     )
     .unwrap();
 
-    let input: String = Input::new()
-        .with_prompt("New tag")
-        .default(next_tag_proposal.to_string())
-        .interact_text()
-        .unwrap();
+    let next_tag = get_next_tag(&next_tag_proposal).to_string();
+    let message = get_message(&repo).unwrap();
 
-    let next_tag = Version::parse(&input).unwrap();
+    let x = repo.head().unwrap().target().unwrap();
+    let obj = repo.find_object(x, None).unwrap();
 
     let res = repo
-        .describe(DescribeOptions::new().describe_tags())
-        .unwrap()
-        .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))
+        .tag(&next_tag, &obj, &repo.signature().unwrap(), &message, false)
+        .unwrap();
+    let create = Confirm::new()
+        .with_prompt("Create tag?")
+        .interact()
         .unwrap();
 
-    let mut revwalk = repo.revwalk().unwrap();
-    revwalk.push_head().unwrap();
-    revwalk
-        .hide_ref(format!("refs/tags/{}", &res).as_str())
-        .unwrap();
-    let commit_messages = revwalk
-        .map(|x| repo.find_commit(x.unwrap()))
-        .filter_map(|x| x.ok())
-        .fold(String::from("release_notes:"), |acc, x| {
-            format!("{}\n - {:.7} {}", acc, x.id(), x.summary().unwrap())
-        });
-
-    let message = Editor::new().edit(&commit_messages).unwrap();
+    if create {
+        let success = repo
+            .remotes()
+            .unwrap()
+            .iter()
+            .map(|name| repo.find_remote(name.unwrap()))
+            .map(|remote| remote.unwrap().push(&vec![String::new(); 0], None));
+    }
 }
 
 fn print_tag(version: &Version, annotation: &str) {
@@ -145,7 +133,17 @@ fn get_branch_commits(repo: &Repository) -> Result<git2::Revwalk, Error> {
     Ok(revwalk)
 }
 
-fn get_next_tag(
+fn get_next_tag(proposal: &Version) -> Version {
+    let input: String = Input::new()
+        .with_prompt("New tag")
+        .default(proposal.to_string())
+        .interact_text()
+        .unwrap();
+
+    Version::parse(&input).unwrap()
+}
+
+fn get_next_tag_proposal(
     latest: &Version,
     latest_current: Option<&Version>,
     pre_tags: &Vec<&TagVersion>,
@@ -160,6 +158,31 @@ fn get_next_tag(
     }
 }
 
+fn get_message(repo: &Repository) -> Option<String> {
+    let previous_tag = repo
+        .describe(DescribeOptions::new().describe_tags())
+        .ok()?
+        .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))
+        .ok()?;
+
+    let mut revwalk = repo.revwalk().unwrap();
+    revwalk.push_head().unwrap();
+    revwalk
+        .hide_ref(format!("refs/tags/{}", &previous_tag).as_str())
+        .unwrap();
+    let commit_messages = revwalk
+        .filter_map(|reference| repo.find_commit(reference.unwrap()).ok())
+        .fold(String::from("release_notes:"), |acc, commit| {
+            format!(
+                "{}\n - {:.7} {}",
+                acc,
+                commit.id(),
+                commit.summary().unwrap()
+            )
+        });
+    Editor::new().edit(&commit_messages).unwrap()
+}
+
 fn prompt_increment(version: &Version) -> Option<Version> {
     let items = vec!["major", "minor", "patch"];
     let selection = Select::with_theme(&ColorfulTheme::default())
@@ -167,14 +190,11 @@ fn prompt_increment(version: &Version) -> Option<Version> {
         .default(0)
         .interact_on_opt(&Term::stderr())
         .ok()?;
-    match selection {
-        Some(index) => match index {
-            0 => Some(increment_version(version, VersionLevel::Major)),
-            1 => Some(increment_version(version, VersionLevel::Minor)),
-            _ => Some(increment_version(version, VersionLevel::Patch)),
-        },
-        None => None,
-    }
+    selection.map(|index| match index {
+        0 => Version::new(version.major + 1, 0, 0),
+        1 => Version::new(version.major, version.minor + 1, 0),
+        _ => Version::new(version.major, version.minor, version.patch + 1),
+    })
 }
 
 fn increment_pretag(version: &Version) -> Version {
@@ -195,13 +215,5 @@ fn increment_pretag(version: &Version) -> Version {
         patch: version.patch,
         pre: Prerelease::new(&format!("pre{}", new_pre_version)).unwrap(),
         build: BuildMetadata::EMPTY,
-    }
-}
-
-fn increment_version(version: &Version, level: VersionLevel) -> Version {
-    match level {
-        VersionLevel::Major => Version::new(version.major + 1, 0, 0),
-        VersionLevel::Minor => Version::new(version.major, version.minor + 1, 0),
-        VersionLevel::Patch => Version::new(version.major, version.minor, version.patch + 1),
     }
 }
