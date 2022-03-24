@@ -1,12 +1,10 @@
 use std::{collections::HashSet, iter::FromIterator};
 
-use ansi_term::Colour::Yellow;
-use console::Term;
+use console::{Style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Editor, Input, Select};
 use git2::{DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag};
 use regex::Regex;
 use semver::{BuildMetadata, Prerelease, Version};
-use strum_macros::EnumIter;
 use substring::Substring;
 
 struct TagVersion<'a> {
@@ -22,8 +20,8 @@ fn main() {
 }
 
 fn get_latest_tags(repo: &Repository) {
-    let revwalk = get_branch_commits(&repo).unwrap();
-    let current_branch_commits = HashSet::<Oid>::from_iter(revwalk.filter_map(Result::ok));
+    let revwalk = get_branch_commits(&repo).unwrap().filter_map(Result::ok);
+    let current_branch_commits = HashSet::<Oid>::from_iter(revwalk);
 
     let head = &repo.head().unwrap();
     if head.is_branch() {
@@ -32,48 +30,46 @@ fn get_latest_tags(repo: &Repository) {
 
     let tag_names = repo.tag_names(None).unwrap();
 
-    let versions = tag_names
+    let all_tags = tag_names
         .iter()
         .filter_map(|name| name)
         .filter_map(|name| get_tag_version(&repo, name))
         .collect::<Vec<_>>();
 
-    let latest_release = &versions
+    let latest_main_tag = &all_tags
         .iter()
         .filter(|v| v.version.pre.is_empty())
         .map(|v| v.version.clone())
         .max()
         .unwrap_or(Version::new(0, 0, 0));
 
-    let pre_tags = &versions
+    let all_pre_tags = &all_tags
         .iter()
         .filter(|v| !v.version.pre.is_empty())
-        .filter(|v| v.version.gt(latest_release))
+        .filter(|v| v.version.gt(latest_main_tag))
         .collect::<Vec<_>>();
 
-    let current_branch_pre_tag = pre_tags
+    let latest_branch_pre_tag = all_pre_tags
         .iter()
         .filter(|v| current_branch_commits.contains(&v.tag.target().unwrap().id()))
         .max_by(|x, y| x.version.cmp(&y.version));
 
     println!("\nLatest tags:");
-    print_tag(&latest_release, "main");
-    current_branch_pre_tag.map(|v| print_tag(&v.version, "current branch"));
+    print_tag(&latest_main_tag, "main");
+    latest_branch_pre_tag.map(|v| print_tag(&v.version, "current branch"));
 
     println!("\nOther branches:");
-    pre_tags
-        .iter()
-        .for_each(|t| println!(" {}", Yellow.paint(format!("v{}", &t.version.to_string()))));
+    all_pre_tags.iter().for_each(|t| print_tag(&t.version, ""));
 
     let next_tag_proposal = get_next_tag_proposal(
-        latest_release,
-        current_branch_pre_tag.map(|v| &v.version),
-        pre_tags,
+        latest_main_tag,
+        latest_branch_pre_tag.map(|v| &v.version),
+        all_pre_tags,
         head.name().unwrap() == "refs/heads/main",
     )
     .unwrap();
 
-    let next_tag = get_next_tag(&next_tag_proposal).to_string();
+    let next_tag = prompt_next_tag(&next_tag_proposal).to_string();
     let message = get_message(&repo).unwrap();
 
     let x = repo.head().unwrap().target().unwrap();
@@ -97,10 +93,12 @@ fn get_latest_tags(repo: &Repository) {
     }
 }
 
+// Print a tag nicely
 fn print_tag(version: &Version, annotation: &str) {
+    let tag_style = Style::new().yellow().bold();
     println!(
         " {} - {}",
-        Yellow.paint(format!("v{: <10}", version)),
+        tag_style.apply_to(format!("v{: <10}", version)),
         annotation
     );
 }
@@ -133,9 +131,10 @@ fn get_branch_commits(repo: &Repository) -> Result<git2::Revwalk, Error> {
     Ok(revwalk)
 }
 
-fn get_next_tag(proposal: &Version) -> Version {
+// Proposes new tag to user and prompts for confirmation
+fn prompt_next_tag(proposal: &Version) -> Version {
     let input: String = Input::new()
-        .with_prompt("New tag")
+        .with_prompt("\nNew tag")
         .default(proposal.to_string())
         .interact_text()
         .unwrap();
@@ -143,6 +142,7 @@ fn get_next_tag(proposal: &Version) -> Version {
     Version::parse(&input).unwrap()
 }
 
+// Determine new tag proposal based on tag history
 fn get_next_tag_proposal(
     latest: &Version,
     latest_current: Option<&Version>,
@@ -158,6 +158,7 @@ fn get_next_tag_proposal(
     }
 }
 
+// Determine message based on commit history and allow user to edit
 fn get_message(repo: &Repository) -> Option<String> {
     let previous_tag = repo
         .describe(DescribeOptions::new().describe_tags())
@@ -183,11 +184,12 @@ fn get_message(repo: &Repository) -> Option<String> {
     Editor::new().edit(&commit_messages).unwrap()
 }
 
+// Prompt user which part of the version to increment
 fn prompt_increment(version: &Version) -> Option<Version> {
     let items = vec!["major", "minor", "patch"];
     let selection = Select::with_theme(&ColorfulTheme::default())
         .items(&items)
-        .default(0)
+        .default(2)
         .interact_on_opt(&Term::stderr())
         .ok()?;
     selection.map(|index| match index {
@@ -197,6 +199,7 @@ fn prompt_increment(version: &Version) -> Option<Version> {
     })
 }
 
+// Increment the -pre string of the version
 fn increment_pretag(version: &Version) -> Version {
     let re = Regex::new(r"pre(\d+)").unwrap();
     let version_str = version.pre.as_str();

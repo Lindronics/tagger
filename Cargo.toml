@@ -8,12 +8,8 @@ edition = "2018"
 
 [dependencies]
 semver = "1.0"
-git-repository = "0.14.0"
 git2 = "0.14"
 substring = "1.4.5"
-ansi_term = "0.12"
 regex = "1.5.5" 
 console = "0.15.0"
 dialoguer = "0.10.0"
-strum = "0.24"
-strum_macros = "0.24"
