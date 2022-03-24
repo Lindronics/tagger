@@ -2,8 +2,8 @@ use std::{collections::HashSet, iter::FromIterator};
 
 use ansi_term::Colour::Yellow;
 use console::Term;
-use dialoguer::{theme::ColorfulTheme, Editor, Select, Input};
-use git2::{Error, Oid, Repository, Tag};
+use dialoguer::{theme::ColorfulTheme, Editor, Input, Select};
+use git2::{DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag};
 use regex::Regex;
 use semver::{BuildMetadata, Prerelease, Version};
 use strum_macros::EnumIter;
@@ -77,21 +77,36 @@ fn get_latest_tags(repo: &Repository) {
         current_branch_pre_tag.map(|v| &v.version),
         pre_tags,
         head.name().unwrap() == "refs/heads/main",
-    ).unwrap();
+    )
+    .unwrap();
 
     let input: String = Input::new()
         .with_prompt("New tag")
         .default(next_tag_proposal.to_string())
-        .interact_text().unwrap();
+        .interact_text()
+        .unwrap();
 
     let next_tag = Version::parse(&input).unwrap();
 
-    // if let Some(rv) = Editor::new().edit("Enter a commit message").unwrap() {
-    //     println!("Your message:");
-    //     println!("{}", rv);
-    // } else {
-    //     println!("Abort!");
-    // }
+    let res = repo
+        .describe(DescribeOptions::new().describe_tags())
+        .unwrap()
+        .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))
+        .unwrap();
+
+    let mut revwalk = repo.revwalk().unwrap();
+    revwalk.push_head().unwrap();
+    revwalk
+        .hide_ref(format!("refs/tags/{}", &res).as_str())
+        .unwrap();
+    let commit_messages = revwalk
+        .map(|x| repo.find_commit(x.unwrap()))
+        .filter_map(|x| x.ok())
+        .fold(String::from("release_notes:"), |acc, x| {
+            format!("{}\n - {:.7} {}", acc, x.id(), x.summary().unwrap())
+        });
+
+    let message = Editor::new().edit(&commit_messages).unwrap();
 }
 
 fn print_tag(version: &Version, annotation: &str) {
