@@ -2,7 +2,7 @@ use std::{collections::HashSet, iter::FromIterator};
 
 use console::{Style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Editor, Input, Select};
-use git2::{DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag};
+use git2::{DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag, Branch};
 use regex::Regex;
 use semver::{BuildMetadata, Prerelease, Version};
 use substring::Substring;
@@ -14,6 +14,7 @@ struct TagVersion<'a> {
 
 fn main() {
     let path = "/Users/lindronics/workspace/tests/tag_test";
+    // let path = std::env::current_dir().unwrap();
     let repo = Repository::open(path).unwrap();
 
     get_latest_tags(&repo)
@@ -24,13 +25,14 @@ fn get_latest_tags(repo: &Repository) {
     let current_branch_commits = HashSet::<Oid>::from_iter(revwalk);
 
     let head = &repo.head().unwrap();
-    if head.is_branch() {
-        println!("Current branch: {}", head.name().unwrap())
+    if !head.is_branch() {
+        return;
     }
+    let head_commit = repo.find_object(head.target().unwrap(), None).unwrap();
 
-    let tag_names = repo.tag_names(None).unwrap();
-
-    let all_tags = tag_names
+    let all_tags = repo
+        .tag_names(None)
+        .unwrap()
         .iter()
         .filter_map(|name| name)
         .filter_map(|name| get_tag_version(&repo, name))
@@ -52,45 +54,58 @@ fn get_latest_tags(repo: &Repository) {
     let latest_branch_pre_tag = all_pre_tags
         .iter()
         .filter(|v| current_branch_commits.contains(&v.tag.target().unwrap().id()))
-        .max_by(|x, y| x.version.cmp(&y.version));
+        .map(|v| &v.version)
+        .max();
 
     println!("\nLatest tags:");
     print_tag(&latest_main_tag, "main");
-    latest_branch_pre_tag.map(|v| print_tag(&v.version, "current branch"));
+    latest_branch_pre_tag.map(|v| print_tag(&v, "current branch"));
 
     println!("\nOther branches:");
     all_pre_tags.iter().for_each(|t| print_tag(&t.version, ""));
 
     let next_tag_proposal = get_next_tag_proposal(
         latest_main_tag,
-        latest_branch_pre_tag.map(|v| &v.version),
+        latest_branch_pre_tag,
         all_pre_tags,
-        head.name().unwrap() == "refs/heads/main",
+        head.name().unwrap() == "refs/heads/main" || head.name().unwrap() == "refs/heads/master",
     )
     .unwrap();
 
     let next_tag = prompt_next_tag(&next_tag_proposal).to_string();
     let message = get_message(&repo).unwrap();
 
-    let x = repo.head().unwrap().target().unwrap();
-    let obj = repo.find_object(x, None).unwrap();
-
-    let res = repo
-        .tag(&next_tag, &obj, &repo.signature().unwrap(), &message, false)
+    let created_ref = repo
+        .tag(
+            &next_tag,
+            &head_commit,
+            &repo.signature().unwrap(),
+            &message,
+            false,
+        )
         .unwrap();
-    let create = Confirm::new()
-        .with_prompt("Create tag?")
-        .interact()
-        .unwrap();
 
-    if create {
+    let message_style = Style::new().italic();
+    println!(
+        "\nTag created:\n\n{:.7}\n{}\n",
+        created_ref,
+        message_style.apply_to(message)
+    );
+
+    if Confirm::new().with_prompt("Push tag?").interact().unwrap() {
         let success = repo
             .remotes()
             .unwrap()
             .iter()
             .map(|name| repo.find_remote(name.unwrap()))
             .map(|remote| remote.unwrap().push(&vec![String::new(); 0], None));
-    }
+        println!("Successfully pushed tag to origin.")
+    };
+}
+
+fn get_main_branch(repo: &Repository) -> Result<Branch, Error> {
+    repo.find_branch("main", git2::BranchType::Local)
+        .or(repo.find_branch("master", git2::BranchType::Local))
 }
 
 // Print a tag nicely
@@ -124,7 +139,7 @@ fn parse_version(tag: &Tag) -> Option<Version> {
 
 // Get all commits on current branch
 fn get_branch_commits(repo: &Repository) -> Result<git2::Revwalk, Error> {
-    let main = repo.find_branch("main", git2::BranchType::Local)?;
+    let main = get_main_branch(repo)?;
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
     revwalk.hide_ref(main.get().name().unwrap())?;
