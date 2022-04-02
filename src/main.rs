@@ -1,96 +1,52 @@
 mod version_operations;
 
-use std::{collections::HashSet, iter::FromIterator, str::FromStr};
+use std::{error::Error, str::FromStr};
 
 use console::{Style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Editor, Input, Select};
-use git2::{Branch, DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag};
+use git2::{DescribeFormatOptions, DescribeOptions, Repository};
 use semver::Version;
 use strum::VariantNames;
 use substring::Substring;
 use version_operations::{MutVersion, SubVersion};
 
-struct TagVersion<'a> {
-    tag: Tag<'a>,
-    version: Version,
-}
-
 fn main() {
-    let path = "/Users/lindronics/workspace/tests/tag_test";
-    // let path = std::env::current_dir().unwrap();
-    let repo = Repository::open(path).unwrap();
-
-    get_latest_tags(&repo)
+    tagger().unwrap();
 }
 
-fn get_latest_tags(repo: &Repository) {
-    let revwalk = get_branch_commits(&repo).unwrap().filter_map(Result::ok);
-    let current_branch_commits = HashSet::<Oid>::from_iter(revwalk);
+fn tagger() -> Result<(), Box<dyn Error>> {
+    let path = std::env::current_dir()?;
+    let repo = Repository::open(path)?;
 
-    let head = &repo.head().unwrap();
-    if !head.is_branch() {
-        return;
+    // Get whether on main branch
+    let head = &repo.head()?;
+    assert!(head.is_branch());
+    let head_commit = repo.find_object(head.target().unwrap(), None)?;
+    let is_main = match head.name().unwrap() {
+        "refs/heads/main" | "refs/heads/master" => true,
+        _ => false,
+    };
+
+    // Get latest tags
+    let (latest_version, latest_pre, all_pre) = get_latest_tags(&repo, &is_main)?;
+    print_summary(&latest_version, &latest_pre, &all_pre);
+
+    let next_tag_proposal = match is_main {
+        true => prompt_increment(&latest_version),
+        false => match latest_pre {
+            Some(version) => Some(version.clone().increment_pretag(1)),
+            None => prompt_increment(&latest_version).map(|x| x.increment_pretag(1)),
+        },
     }
-    let head_commit = repo.find_object(head.target().unwrap(), None).unwrap();
+    .unwrap()
+    .resolve_collision(&all_pre);
 
-    let all_tags = repo
-        .tag_names(None)
-        .unwrap()
-        .iter()
-        .filter_map(|name| name)
-        .filter_map(|name| get_tag_version(&repo, name))
-        .collect::<Vec<_>>();
-
-    let latest_main_tag = &all_tags
-        .iter()
-        .filter(|v| v.version.pre.is_empty())
-        .map(|v| v.version.clone())
-        .max()
-        .unwrap_or(Version::new(0, 0, 0));
-
-    let all_pre_tags = &all_tags
-        .into_iter()
-        .filter(|v| !v.version.pre.is_empty())
-        .filter(|v| v.version.gt(latest_main_tag))
-        .collect::<Vec<_>>();
-
-    let latest_branch_pre_tag = all_pre_tags
-        .iter()
-        .filter(|v| current_branch_commits.contains(&v.tag.target().unwrap().id()))
-        .map(|v| &v.version)
-        .max();
-
-    println!("\nLatest tags:");
-    print_tag(&latest_main_tag, "main");
-    latest_branch_pre_tag.map(|v| print_tag(&v, "current branch"));
-
-    println!("\nOther branches:");
-    all_pre_tags.iter().for_each(|t| print_tag(&t.version, ""));
-
-    let next_tag_proposal = get_next_tag_proposal(
-        latest_main_tag,
-        latest_branch_pre_tag,
-        &all_pre_tags
-            .iter()
-            .map(|v| v.version.clone())
-            .collect::<Vec<_>>(),
-        head.name().unwrap() == "refs/heads/main" || head.name().unwrap() == "refs/heads/master",
-    )
-    .unwrap();
-
+    // Determine new tag version and message
     let next_tag = prompt_next_tag(&next_tag_proposal).to_string();
     let message = get_message(&repo).unwrap();
 
-    let created_ref = repo
-        .tag(
-            &next_tag,
-            &head_commit,
-            &repo.signature().unwrap(),
-            &message,
-            false,
-        )
-        .unwrap();
-
+    // Create new tag
+    let created_ref = repo.tag(&next_tag, &head_commit, &repo.signature()?, &message, false)?;
     let message_style = Style::new().italic();
     println!(
         "\nTag created:\n\n{:.7}\n{}\n",
@@ -98,20 +54,64 @@ fn get_latest_tags(repo: &Repository) {
         message_style.apply_to(message)
     );
 
-    if Confirm::new().with_prompt("Push tag?").interact().unwrap() {
+    // Push tag
+    if Confirm::new().with_prompt("Push tag?").interact()? {
         let _success = repo
-            .remotes()
-            .unwrap()
+            .remotes()?
             .iter()
             .map(|name| repo.find_remote(name.unwrap()))
-            .map(|remote| remote.unwrap().push(&vec![String::new(); 0], None));
+            .map(|remote| remote?.push(&vec![String::new(); 0], None));
         println!("Successfully pushed tag to origin.")
     };
+
+    Ok(())
 }
 
-fn get_main_branch(repo: &Repository) -> Result<Branch, Error> {
-    repo.find_branch("main", git2::BranchType::Local)
-        .or(repo.find_branch("master", git2::BranchType::Local))
+fn get_latest_tags(
+    repo: &Repository,
+    is_main: &bool,
+) -> Result<(Version, Option<Version>, Vec<Version>), Box<dyn Error>> {
+    let all_versions = repo
+        .tag_names(None)?
+        .iter()
+        .filter_map(|name| name)
+        .filter_map(|name| parse_version(&name))
+        .collect::<Vec<_>>();
+
+    let latest_version = all_versions
+        .iter()
+        .filter(|version| version.pre.is_empty())
+        .max()
+        .map(|version| version.to_owned())
+        .unwrap_or(Version::new(0, 0, 0));
+
+    let all_pre = all_versions
+        .into_iter()
+        .filter(|version| !version.pre.is_empty())
+        .filter(|version| version.gt(&latest_version))
+        .collect::<Vec<_>>();
+
+    let latest_pre = match is_main {
+        true => None,
+        false => {
+            let name = repo
+                .describe(DescribeOptions::new().describe_tags())?
+                .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))?;
+            parse_version(&name)
+        }
+    };
+    Ok((latest_version, latest_pre, all_pre))
+}
+
+fn print_summary(latest_version: &Version, latest_pre: &Option<Version>, all_pre: &Vec<Version>) {
+    println!("\nLatest tags:");
+    print_tag(&latest_version, "main");
+    match latest_pre {
+        Some(version) => print_tag(&version, "current branch"),
+        None => {}
+    }
+    println!("\nAll current pre-tags:");
+    all_pre.iter().for_each(|t| print_tag(&t, ""));
 }
 
 // Print a tag nicely
@@ -124,32 +124,10 @@ fn print_tag(version: &Version, annotation: &str) {
     );
 }
 
-fn get_tag_version<'a>(repo: &'a Repository, tag_name: &str) -> Option<TagVersion<'a>> {
-    let tag = get_tag(&repo, tag_name).ok()?;
-    let version = parse_version(&tag)?;
-    Some(TagVersion { tag, version })
-}
-
-// Get tag object from name
-fn get_tag<'repo>(repo: &'repo Repository, tag_name: &str) -> Result<Tag<'repo>, Error> {
-    let ref_name = format!("refs/tags/{}", tag_name);
-    repo.find_reference(&ref_name).and_then(|x| x.peel_to_tag())
-}
-
 // Parses tag into version string
-fn parse_version(tag: &Tag) -> Option<Version> {
-    let version_substr = tag.name()?;
-    let semver_str = version_substr.substring(1, version_substr.len());
+fn parse_version(tag: &str) -> Option<Version> {
+    let semver_str = tag.substring(1, tag.len());
     Version::parse(semver_str).ok()
-}
-
-// Get all commits on current branch
-fn get_branch_commits(repo: &Repository) -> Result<git2::Revwalk, Error> {
-    let main = get_main_branch(repo)?;
-    let mut revwalk = repo.revwalk()?;
-    revwalk.push_head()?;
-    revwalk.hide_ref(main.get().name().unwrap())?;
-    Ok(revwalk)
 }
 
 // Proposes new tag to user and prompts for confirmation
@@ -161,23 +139,6 @@ fn prompt_next_tag(proposal: &Version) -> Version {
         .unwrap();
 
     Version::parse(&input).unwrap()
-}
-
-// Determine new tag proposal based on tag history
-fn get_next_tag_proposal(
-    latest: &Version,
-    latest_current: Option<&Version>,
-    pre_tags: &Vec<Version>,
-    is_main: bool,
-) -> Option<Version> {
-    match is_main {
-        true => prompt_increment(latest),
-        false => match latest_current {
-            Some(version) => Some(version.clone().increment_pretag(1)),
-            None => prompt_increment(latest).map(|x| x.increment_pretag(1)),
-        },
-    }
-    .map(|version| version.resolve_collision(pre_tags))
 }
 
 // Determine message based on commit history and allow user to edit
@@ -208,6 +169,7 @@ fn get_message(repo: &Repository) -> Option<String> {
 
 // Prompt user which part of the version to increment
 fn prompt_increment(version: &Version) -> Option<Version> {
+    println!("\nCreate a new version with incremented:");
     let items = SubVersion::VARIANTS;
     let selection = Select::with_theme(&ColorfulTheme::default())
         .items(&items)
