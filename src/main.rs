@@ -1,11 +1,14 @@
-use std::{collections::HashSet, iter::FromIterator};
+mod version_operations;
+
+use std::{collections::HashSet, iter::FromIterator, str::FromStr};
 
 use console::{Style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Editor, Input, Select};
-use git2::{DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag, Branch};
-use regex::Regex;
-use semver::{BuildMetadata, Prerelease, Version};
+use git2::{Branch, DescribeFormatOptions, DescribeOptions, Error, Oid, Repository, Tag};
+use semver::Version;
+use strum::VariantNames;
 use substring::Substring;
+use version_operations::{MutVersion, SubVersion};
 
 struct TagVersion<'a> {
     tag: Tag<'a>,
@@ -46,7 +49,7 @@ fn get_latest_tags(repo: &Repository) {
         .unwrap_or(Version::new(0, 0, 0));
 
     let all_pre_tags = &all_tags
-        .iter()
+        .into_iter()
         .filter(|v| !v.version.pre.is_empty())
         .filter(|v| v.version.gt(latest_main_tag))
         .collect::<Vec<_>>();
@@ -67,7 +70,10 @@ fn get_latest_tags(repo: &Repository) {
     let next_tag_proposal = get_next_tag_proposal(
         latest_main_tag,
         latest_branch_pre_tag,
-        all_pre_tags,
+        &all_pre_tags
+            .iter()
+            .map(|v| v.version.clone())
+            .collect::<Vec<_>>(),
         head.name().unwrap() == "refs/heads/main" || head.name().unwrap() == "refs/heads/master",
     )
     .unwrap();
@@ -93,7 +99,7 @@ fn get_latest_tags(repo: &Repository) {
     );
 
     if Confirm::new().with_prompt("Push tag?").interact().unwrap() {
-        let success = repo
+        let _success = repo
             .remotes()
             .unwrap()
             .iter()
@@ -112,7 +118,7 @@ fn get_main_branch(repo: &Repository) -> Result<Branch, Error> {
 fn print_tag(version: &Version, annotation: &str) {
     let tag_style = Style::new().yellow().bold();
     println!(
-        " {} - {}",
+        " {} {}",
         tag_style.apply_to(format!("v{: <10}", version)),
         annotation
     );
@@ -161,16 +167,17 @@ fn prompt_next_tag(proposal: &Version) -> Version {
 fn get_next_tag_proposal(
     latest: &Version,
     latest_current: Option<&Version>,
-    pre_tags: &Vec<&TagVersion>,
+    pre_tags: &Vec<Version>,
     is_main: bool,
 ) -> Option<Version> {
     match is_main {
         true => prompt_increment(latest),
         false => match latest_current {
-            Some(version) => Some(increment_pretag(version)),
-            None => prompt_increment(latest).map(|x| increment_pretag(&x)),
+            Some(version) => Some(version.clone().increment_pretag(1)),
+            None => prompt_increment(latest).map(|x| x.increment_pretag(1)),
         },
     }
+    .map(|version| version.resolve_collision(pre_tags))
 }
 
 // Determine message based on commit history and allow user to edit
@@ -201,37 +208,15 @@ fn get_message(repo: &Repository) -> Option<String> {
 
 // Prompt user which part of the version to increment
 fn prompt_increment(version: &Version) -> Option<Version> {
-    let items = vec!["major", "minor", "patch"];
+    let items = SubVersion::VARIANTS;
     let selection = Select::with_theme(&ColorfulTheme::default())
         .items(&items)
         .default(2)
         .interact_on_opt(&Term::stderr())
         .ok()?;
-    selection.map(|index| match index {
-        0 => Version::new(version.major + 1, 0, 0),
-        1 => Version::new(version.major, version.minor + 1, 0),
-        _ => Version::new(version.major, version.minor, version.patch + 1),
+    selection.map(|i| {
+        version
+            .clone()
+            .increment_version(SubVersion::from_str(items.get(i).unwrap()).unwrap())
     })
-}
-
-// Increment the -pre string of the version
-fn increment_pretag(version: &Version) -> Version {
-    let re = Regex::new(r"pre(\d+)").unwrap();
-    let version_str = version.pre.as_str();
-
-    let new_pre_version = match version_str {
-        "" => 0,
-        _ => {
-            let cap = re.captures(&version_str).unwrap();
-            let pre_tag_version: i32 = cap[1].parse().unwrap();
-            pre_tag_version + 1
-        }
-    };
-    Version {
-        major: version.major,
-        minor: version.minor,
-        patch: version.patch,
-        pre: Prerelease::new(&format!("pre{}", new_pre_version)).unwrap(),
-        build: BuildMetadata::EMPTY,
-    }
 }
