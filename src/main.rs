@@ -43,7 +43,7 @@ fn tagger() -> Result<(), Box<dyn Error>> {
 
     // Determine new tag version and message
     let next_tag = prompt_next_tag(&next_tag_proposal).to_string();
-    let message = get_message(&repo).unwrap();
+    let message = get_message(&repo, latest_version).unwrap();
 
     // Create new tag
     let created_ref = repo.tag(&next_tag, &head_commit, &repo.signature()?, &message, false)?;
@@ -67,6 +67,8 @@ fn tagger() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Obtains latest version, latest pre-version on current branch, 
+/// and other pre-tags since the latest version
 fn get_latest_tags(
     repo: &Repository,
     is_main: &bool,
@@ -74,8 +76,7 @@ fn get_latest_tags(
     let all_versions = repo
         .tag_names(None)?
         .iter()
-        .filter_map(|name| name)
-        .filter_map(|name| parse_version(&name))
+        .filter_map(|name| parse_version(&name?))
         .collect::<Vec<_>>();
 
     let latest_version = all_versions
@@ -94,15 +95,16 @@ fn get_latest_tags(
     let latest_pre = match is_main {
         true => None,
         false => {
-            let name = repo
+            let latest_pre_name = repo
                 .describe(DescribeOptions::new().describe_tags())?
                 .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))?;
-            parse_version(&name)
+            parse_version(&latest_pre_name)
         }
     };
     Ok((latest_version, latest_pre, all_pre))
 }
 
+/// Prints a summary of current tags
 fn print_summary(latest_version: &Version, latest_pre: &Option<Version>, all_pre: &Vec<Version>) {
     println!("\nLatest tags:");
     print_tag(&latest_version, "main");
@@ -114,7 +116,7 @@ fn print_summary(latest_version: &Version, latest_pre: &Option<Version>, all_pre
     all_pre.iter().for_each(|t| print_tag(&t, ""));
 }
 
-// Print a tag nicely
+/// Prints a tag nicely
 fn print_tag(version: &Version, annotation: &str) {
     let tag_style = Style::new().yellow().bold();
     println!(
@@ -124,13 +126,13 @@ fn print_tag(version: &Version, annotation: &str) {
     );
 }
 
-// Parses tag into version string
+/// Parses tag into version string
 fn parse_version(tag: &str) -> Option<Version> {
     let semver_str = tag.substring(1, tag.len());
     Version::parse(semver_str).ok()
 }
 
-// Proposes new tag to user and prompts for confirmation
+/// Proposes new tag to user and prompts for confirmation
 fn prompt_next_tag(proposal: &Version) -> Version {
     let input: String = Input::new()
         .with_prompt("\nNew tag")
@@ -141,18 +143,12 @@ fn prompt_next_tag(proposal: &Version) -> Version {
     Version::parse(&input).unwrap()
 }
 
-// Determine message based on commit history and allow user to edit
-fn get_message(repo: &Repository) -> Option<String> {
-    let previous_tag = repo
-        .describe(DescribeOptions::new().describe_tags())
-        .ok()?
-        .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))
-        .ok()?;
-
-    let mut revwalk = repo.revwalk().unwrap();
-    revwalk.push_head().unwrap();
+/// Determine message based on commit history and allow user to edit
+fn get_message(repo: &Repository, latest_tag: Version) -> Option<String> {
+    let mut revwalk = repo.revwalk().ok()?;
+    revwalk.push_head().ok()?;
     revwalk
-        .hide_ref(format!("refs/tags/{}", &previous_tag).as_str())
+        .hide_ref(format!("refs/tags/{}", &latest_tag.to_string()).as_str())
         .unwrap();
     let commit_messages = revwalk
         .filter_map(|reference| repo.find_commit(reference.unwrap()).ok())
@@ -164,10 +160,10 @@ fn get_message(repo: &Repository) -> Option<String> {
                 commit.summary().unwrap()
             )
         });
-    Editor::new().edit(&commit_messages).unwrap()
+    Editor::new().edit(&commit_messages).ok()?
 }
 
-// Prompt user which part of the version to increment
+/// Prompt user which part of the version to increment
 fn prompt_increment(version: &Version) -> Option<Version> {
     println!("\nCreate a new version with incremented:");
     let items = SubVersion::VARIANTS;
