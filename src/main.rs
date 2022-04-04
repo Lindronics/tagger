@@ -28,7 +28,7 @@ fn tagger() -> Result<(), Box<dyn Error>> {
     };
 
     // Get latest tags
-    let (latest_version, latest_pre, all_pre) = get_latest_tags(&repo, &is_main)?;
+    let (latest_version, latest_pre, all_pre) = get_latest_tags(&repo)?;
     print_summary(&latest_version, &latest_pre, &all_pre);
 
     let next_tag_proposal = match is_main {
@@ -67,11 +67,10 @@ fn tagger() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Obtains latest version, latest pre-version on current branch, 
+/// Obtains latest version, latest pre-version on current branch,
 /// and other pre-tags since the latest version
 fn get_latest_tags(
     repo: &Repository,
-    is_main: &bool,
 ) -> Result<(Version, Option<Version>, Vec<Version>), Box<dyn Error>> {
     let all_versions = repo
         .tag_names(None)?
@@ -92,14 +91,14 @@ fn get_latest_tags(
         .filter(|version| version.gt(&latest_version))
         .collect::<Vec<_>>();
 
-    let latest_pre = match is_main {
-        true => None,
-        false => {
-            let latest_pre_name = repo
-                .describe(DescribeOptions::new().describe_tags())?
-                .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))?;
-            parse_version(&latest_pre_name)
-        }
+    let latest_pre = {
+        let latest_pre_name = repo
+            .describe(DescribeOptions::new().describe_tags())?
+            .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))?;
+        parse_version(&latest_pre_name).and_then(|version| match version.eq(&latest_version) {
+            true => None,
+            false => Some(version),
+        })
     };
     Ok((latest_version, latest_pre, all_pre))
 }
@@ -148,7 +147,7 @@ fn get_message(repo: &Repository, latest_tag: Version) -> Option<String> {
     let mut revwalk = repo.revwalk().ok()?;
     revwalk.push_head().ok()?;
     revwalk
-        .hide_ref(format!("refs/tags/{}", &latest_tag.to_string()).as_str())
+        .hide_ref(format!("refs/tags/v{}", &latest_tag.to_string()).as_str())
         .unwrap();
     let commit_messages = revwalk
         .filter_map(|reference| repo.find_commit(reference.unwrap()).ok())
