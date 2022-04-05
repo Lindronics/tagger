@@ -7,7 +7,6 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Editor, Input, Select};
 use git2::{DescribeFormatOptions, DescribeOptions, Repository};
 use semver::Version;
 use strum::VariantNames;
-use substring::Substring;
 use version_operations::{MutVersion, SubVersion};
 
 fn main() {
@@ -42,11 +41,17 @@ fn tagger() -> Result<(), Box<dyn Error>> {
     .resolve_collision(&all_pre);
 
     // Determine new tag version and message
-    let next_tag = prompt_next_tag(&next_tag_proposal).to_string();
+    let next_tag = prompt_next_tag(&next_tag_proposal);
     let message = get_message(&repo, latest_version).unwrap();
 
     // Create new tag
-    let created_ref = repo.tag(&next_tag, &head_commit, &repo.signature()?, &message, false)?;
+    let created_ref = repo.tag(
+        &next_tag.print(),
+        &head_commit,
+        &repo.signature()?,
+        &message,
+        false,
+    )?;
     let message_style = Style::new().italic();
     println!(
         "\nTag created:\n\n{:.7}\n{}\n",
@@ -75,7 +80,7 @@ fn get_latest_tags(
     let all_versions = repo
         .tag_names(None)?
         .iter()
-        .filter_map(|name| parse_version(&name?))
+        .filter_map(|name| Version::parse_v(&name?))
         .collect::<Vec<_>>();
 
     let latest_version = all_versions
@@ -95,7 +100,7 @@ fn get_latest_tags(
         let latest_pre_name = repo
             .describe(DescribeOptions::new().describe_tags())?
             .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))?;
-        parse_version(&latest_pre_name).and_then(|version| match version.eq(&latest_version) {
+        Version::parse_v(&latest_pre_name).and_then(|version| match version.eq(&latest_version) {
             true => None,
             false => Some(version),
         })
@@ -120,45 +125,33 @@ fn print_tag(version: &Version, annotation: &str) {
     let tag_style = Style::new().yellow().bold();
     println!(
         " {} {}",
-        tag_style.apply_to(format!("v{: <10}", version)),
+        tag_style.apply_to(format!("{: <10}", version.print())),
         annotation
     );
-}
-
-/// Parses tag into version string
-fn parse_version(tag: &str) -> Option<Version> {
-    let semver_str = tag.substring(1, tag.len());
-    Version::parse(semver_str).ok()
 }
 
 /// Proposes new tag to user and prompts for confirmation
 fn prompt_next_tag(proposal: &Version) -> Version {
     let input: String = Input::new()
         .with_prompt("\nNew tag")
-        .default(proposal.to_string())
+        .default(proposal.print())
         .interact_text()
         .unwrap();
 
-    Version::parse(&input).unwrap()
+    Version::parse_v(&input).unwrap()
 }
 
 /// Determine message based on commit history and allow user to edit
 fn get_message(repo: &Repository, latest_tag: Version) -> Option<String> {
     let mut revwalk = repo.revwalk().ok()?;
     revwalk.push_head().ok()?;
-    revwalk
-        .hide_ref(format!("refs/tags/v{}", &latest_tag.to_string()).as_str())
-        .unwrap();
-    let commit_messages = revwalk
-        .filter_map(|reference| repo.find_commit(reference.unwrap()).ok())
-        .fold(String::from("release_notes:"), |acc, commit| {
-            format!(
-                "{}\n - {:.7} {}",
-                acc,
-                commit.id(),
-                commit.summary().unwrap()
-            )
-        });
+    revwalk.hide_ref(&latest_tag.to_ref().as_str()).unwrap();
+    let commit_messages = String::from("release_notes:")
+        + &revwalk
+            .filter_map(|reference| repo.find_commit(reference.unwrap()).ok())
+            .map(|commit| format!(" - {:.7} {}", commit.id(), commit.summary().unwrap()))
+            .collect::<Vec<String>>()
+            .join("\n");
     Editor::new().edit(&commit_messages).ok()?
 }
 

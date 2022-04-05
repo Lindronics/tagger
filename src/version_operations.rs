@@ -1,6 +1,7 @@
 use regex::Regex;
 use semver::{Prerelease, Version};
 use strum_macros::{EnumString, EnumVariantNames};
+use substring::Substring;
 
 #[derive(EnumString, EnumVariantNames)]
 pub enum SubVersion {
@@ -21,6 +22,17 @@ pub trait MutVersion {
 
     /// Increments the selected subversion
     fn resolve_collision(self, pre_tags: &Vec<Version>) -> Self;
+
+    /// Prints version string including leading `v`
+    fn print(&self) -> String;
+
+    /// Returns git refname
+    fn to_ref(&self) -> String;
+
+    /// Parses tag with leading `v` from string
+    fn parse_v(name: &str) -> Option<Self>
+    where
+        Self: Sized;
 }
 
 impl MutVersion for Version {
@@ -67,5 +79,18 @@ impl MutVersion for Version {
             }
         };
         self
+    }
+
+    fn print(&self) -> String {
+        format!("v{}", self.to_string())
+    }
+
+    fn parse_v(name: &str) -> Option<Self> {
+        let semver_str = name.substring(1, name.len());
+        Version::parse(semver_str).ok()
+    }
+
+    fn to_ref(&self) -> String {
+        format!("refs/tags/{}", &self.print())
     }
 }
