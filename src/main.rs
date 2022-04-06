@@ -146,7 +146,7 @@ fn get_message(repo: &Repository, latest_tag: Version) -> Option<String> {
     let mut revwalk = repo.revwalk().ok()?;
     revwalk.push_head().ok()?;
     revwalk.hide_ref(&latest_tag.to_ref().as_str()).unwrap();
-    let commit_messages = String::from("release_notes:")
+    let commit_messages = String::from("release_notes:\n")
         + &revwalk
             .filter_map(|reference| repo.find_commit(reference.unwrap()).ok())
             .map(|commit| format!(" - {:.7} {}", commit.id(), commit.summary().unwrap()))
