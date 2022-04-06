@@ -1,3 +1,4 @@
+use anyhow::Result;
 use regex::Regex;
 use semver::{Prerelease, Version};
 use strum_macros::{EnumString, EnumVariantNames};
@@ -30,7 +31,7 @@ pub trait MutVersion {
     fn to_ref(&self) -> String;
 
     /// Parses tag with leading `v` from string
-    fn parse_v(name: &str) -> Option<Self>
+    fn parse_v(name: &str) -> Result<Self>
     where
         Self: Sized;
 }
@@ -85,9 +86,10 @@ impl MutVersion for Version {
         format!("v{}", self.to_string())
     }
 
-    fn parse_v(name: &str) -> Option<Self> {
+    fn parse_v(name: &str) -> Result<Self> {
         let semver_str = name.substring(1, name.len());
-        Version::parse(semver_str).ok()
+        let version = Version::parse(semver_str)?;
+        Ok(version)
     }
 
     fn to_ref(&self) -> String {
