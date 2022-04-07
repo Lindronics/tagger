@@ -102,7 +102,8 @@ fn get_latest_tags(repo: &Repository) -> Result<(Version, Option<Version>, Vec<V
             .describe(DescribeOptions::new().describe_tags())?
             .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))?;
         Version::parse_v(&latest_pre_name).ok()
-    };
+    }
+    .filter(|version| !version.pre.is_empty());
     Ok((latest_version, latest_pre, all_pre))
 }
 
