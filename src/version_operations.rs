@@ -22,7 +22,7 @@ pub trait MutVersion {
     fn set_pretag(self, i: i32) -> Self;
 
     /// Increments the selected subversion
-    fn resolve_collision(self, pre_tags: &Vec<Version>) -> Self;
+    fn resolve_collision(self, pre_tags: &[Version]) -> Self;
 
     /// Prints version string including leading `v`
     fn print(&self) -> String;
@@ -44,7 +44,7 @@ impl MutVersion for Version {
         let new_pre_version = match version_str {
             "" => 0,
             _ => {
-                let cap = re.captures(&version_str).unwrap();
+                let cap = re.captures(version_str).unwrap();
                 let pre_tag_version: i32 = cap[1].parse().unwrap();
                 pre_tag_version + i
             }
@@ -57,7 +57,7 @@ impl MutVersion for Version {
         self
     }
 
-    fn resolve_collision(self, pre_tags: &Vec<Version>) -> Self {
+    fn resolve_collision(self, pre_tags: &[Version]) -> Self {
         match pre_tags.contains(&self) {
             true => self.increment_pretag(100).resolve_collision(pre_tags),
             false => self,
@@ -83,7 +83,7 @@ impl MutVersion for Version {
     }
 
     fn print(&self) -> String {
-        format!("v{}", self.to_string())
+        format!("v{}", self)
     }
 
     fn parse_v(name: &str) -> Result<Self> {
