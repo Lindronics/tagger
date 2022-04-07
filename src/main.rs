@@ -7,6 +7,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use console::Style;
 use dialoguer::Confirm;
+use dialoguer::theme::{Theme, SimpleTheme};
 use dialoguer::{theme::ColorfulTheme, Editor, Input, Select};
 use git2::{DescribeFormatOptions, DescribeOptions, Repository};
 use semver::Version;
@@ -32,16 +33,17 @@ fn tagger() -> Result<()> {
     let head_commit =
         repo.find_object(head.target().context("Could not get head commit")?, None)?;
 
-    // Get latest tags
+    // Get latest tags and commits
     let (latest_version, latest_pre, all_pre) = get_latest_tags(&repo)?;
-    print_summary(&latest_version, &latest_pre, &all_pre);
+    let commits = get_commits(&repo, &latest_version)?;
+    print_summary(&latest_version, &latest_pre, &all_pre, &commits);
 
     // Generate proposal for new tag version
     let next_tag_proposal = match head.name().context("Could not get branch name")? {
-        "refs/heads/main" | "refs/heads/master" => prompt_increment(&latest_version),
+        "refs/heads/main" | "refs/heads/master" => prompt_increment(latest_version),
         _ => match latest_pre {
             Some(version) => Ok(version.clone()),
-            None => prompt_increment(&latest_version),
+            None => prompt_increment(latest_version),
         }
         .map(|version| version.increment_pretag(1)),
     }?
@@ -49,7 +51,7 @@ fn tagger() -> Result<()> {
 
     // Determine new tag version and message
     let next_tag = prompt_next_tag(&next_tag_proposal)?;
-    let message = get_message(&repo, latest_version)?;
+    let message = edit_message(&commits)?;
 
     // Create new tag
     let _created_ref = repo.tag(
@@ -59,11 +61,6 @@ fn tagger() -> Result<()> {
         &message,
         false,
     )?;
-
-    let message_style = Style::new().italic();
-    println!("\nTag created:\n");
-    print_tag(&next_tag, "");
-    println!("{}", message_style.apply_to(message));
 
     // Push tag
     if Confirm::new().with_prompt("\nPush tag?").interact()? {
@@ -108,14 +105,26 @@ fn get_latest_tags(repo: &Repository) -> Result<(Version, Option<Version>, Vec<V
 }
 
 /// Prints a summary of current tags
-fn print_summary(latest_version: &Version, latest_pre: &Option<Version>, all_pre: &Vec<Version>) {
+fn print_summary(
+    latest_version: &Version,
+    latest_pre: &Option<Version>,
+    all_pre: &Vec<Version>,
+    commit_messages: &Vec<String>,
+) {
+    let commit_message_style = Style::new().dim().italic();
     println!("\nLatest tags:");
     print_tag(&latest_version, "main");
     if let Some(version) = latest_pre {
         print_tag(&version, "current branch")
     }
     println!("\nAll current pre-tags:");
-    all_pre.iter().for_each(|version| print_tag(&version, ""));
+    for version in all_pre {
+        print_tag(&version, "")
+    }
+    println!("\nCommits:");
+    for message in commit_messages {
+        println!("{}", commit_message_style.apply_to(message));
+    }
 }
 
 /// Prints a tag nicely
@@ -131,41 +140,42 @@ fn print_tag(version: &Version, annotation: &str) {
 /// Proposes new tag to user and prompts for confirmation
 fn prompt_next_tag(proposal: &Version) -> Result<Version> {
     let input: String = Input::new()
-        .with_prompt("\nNew tag")
-        .default(proposal.print())
+    .with_prompt("\nEnter new tag version")
+    .default(proposal.print())
         .interact_text()?;
 
     let new_version = Version::parse_v(&input)?;
     Ok(new_version)
 }
 
-/// Determine message based on commit history and allow user to edit
-fn get_message(repo: &Repository, latest_tag: Version) -> Result<String> {
+/// Determine message based on commit history
+fn get_commits(repo: &Repository, latest_version: &Version) -> Result<Vec<String>> {
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
-    revwalk.hide_ref(&latest_tag.to_ref().as_str())?;
-    let commit_messages = String::from("release_notes:\n")
-        + &revwalk
-            .filter_map(|reference| repo.find_commit(reference.ok()?).ok())
-            .map(|commit| format!(" - {:.7} {}", commit.id(), commit.summary().unwrap_or("")))
-            .collect::<Vec<String>>()
-            .join("\n");
-    let result = Editor::new().edit(&commit_messages)?;
+    revwalk.hide_ref(&latest_version.to_ref().as_str())?;
+    Ok(revwalk
+        .filter_map(|reference| repo.find_commit(reference.ok()?).ok())
+        .map(|commit| format!(" - {:.7} {}", commit.id(), commit.summary().unwrap_or("")))
+        .collect::<Vec<String>>())
+}
+
+/// Open editor to allow editing tag message
+fn edit_message(commits: &Vec<String>) -> Result<String> {
+    let message = String::from("release_notes:\n") + &commits.join("\n");
+    let result = Editor::new().edit(&message)?;
     Ok(result.unwrap_or(String::new()))
 }
 
 /// Prompt user which part of the version to increment
-fn prompt_increment(version: &Version) -> Result<Version> {
-    println!("\nCreate a new version with incremented:");
+fn prompt_increment(version: Version) -> Result<Version> {
     let items = SubVersion::VARIANTS;
     let selection = Select::with_theme(&ColorfulTheme::default())
         .items(&items)
+        .with_prompt("Subversion to increment")
         .default(2)
-        .interact();
-    let new_version = selection.map(|i| {
-        version
-            .to_owned()
-            .increment_version(SubVersion::from_str(items.get(i).unwrap()).unwrap())
-    })?;
+        .interact()?;
+    let new_version = version.increment_version(SubVersion::from_str(
+        &items.get(selection).context("Invalid selection")?,
+    )?);
     Ok(new_version)
 }
