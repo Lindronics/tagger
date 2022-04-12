@@ -45,12 +45,6 @@ fn tagger() -> Result<()> {
         .max()
         .map(|version| version.to_owned());
 
-    let all_pre = all_tags
-        .into_iter()
-        .filter(|version| !version.pre.is_empty())
-        .filter(|version| version.gt(&latest_version.to_owned().unwrap_or(Version::new(0, 0, 0))))
-        .collect::<Vec<_>>();
-
     let latest_current_pre = repo
         .describe(DescribeOptions::new().describe_tags())
         .and_then(|describe| {
@@ -60,8 +54,13 @@ fn tagger() -> Result<()> {
         .and_then(|name: String| Version::parse_v(&name).ok())
         .filter(|version| !version.pre.is_empty());
 
-    let commits = get_commits(&repo, &latest_version, &latest_current_pre)?;
-    print_summary(&latest_version, &latest_current_pre, &all_pre, &commits);
+    let commit_history = get_commit_history(&repo, &all_tags)?;
+    print_summary(
+        &latest_version,
+        &latest_current_pre,
+        &all_tags,
+        &commit_history,
+    );
 
     // Generate proposal for new tag version
     let next_tag_proposal = match head.name().context("Could not get branch name")? {
@@ -72,11 +71,11 @@ fn tagger() -> Result<()> {
         }
         .map(|version| version.increment_pretag(1)),
     }?
-    .resolve_collision(&all_pre);
+    .resolve_collision(&all_tags);
 
     // Determine new tag version and message
     let next_tag = prompt_next_tag(&next_tag_proposal)?;
-    let message = edit_message(&commits)?;
+    let message = edit_message(&commit_history)?;
 
     // Create new tag
     let _created_ref = repo.tag(
@@ -101,7 +100,7 @@ fn tagger() -> Result<()> {
 fn print_summary(
     latest_version: &Option<Version>,
     latest_pre: &Option<Version>,
-    all_pre: &[Version],
+    all_tags: &[Version],
     commit_messages: &[String],
 ) {
     let commit_message_style = Style::new().dim().italic();
@@ -113,13 +112,18 @@ fn print_summary(
         print_tag(version, "current branch")
     }
     println!("\nAll current pre-tags:");
-    for version in all_pre {
+    for version in all_tags
+        .iter()
+        .filter(|version| !version.pre.is_empty())
+        .filter(|&version| version.gt(&latest_version.to_owned().unwrap_or(Version::new(0, 0, 0))))
+    {
         print_tag(version, "")
     }
-    println!("\nCommits:");
+    println!("\nCommits since latest tag:");
     for message in commit_messages {
         println!("{}", commit_message_style.apply_to(message));
     }
+    println!();
 }
 
 /// Prints a tag nicely
@@ -142,17 +146,10 @@ fn prompt_next_tag(proposal: &Version) -> Result<Version> {
 }
 
 /// Determine message based on commit history
-fn get_commits(
-    repo: &Repository,
-    latest_version: &Option<Version>,
-    latest_pre: &Option<Version>,
-) -> Result<Vec<String>> {
+fn get_commit_history(repo: &Repository, all_tags: &[Version]) -> Result<Vec<String>> {
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
-    if let Some(version) = latest_version {
-        revwalk.hide_ref(&version.to_ref())?;
-    }
-    if let Some(version) = latest_pre {
+    for version in all_tags {
         revwalk.hide_ref(&version.to_ref())?;
     }
     Ok(revwalk
@@ -164,7 +161,9 @@ fn get_commits(
 /// Open editor to allow editing tag message
 fn edit_message(commits: &[String]) -> Result<String> {
     let message = String::from("release_notes:\n") + &commits.join("\n");
-    let result = Editor::new().edit(&message)?;
+    let result = Editor::new()
+        .edit(&message)?
+        .map(|message| message.replace(':', ""));
     Ok(result.unwrap_or_default())
 }
 
