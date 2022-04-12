@@ -33,14 +33,40 @@ fn tagger() -> Result<()> {
         repo.find_object(head.target().context("Could not get head commit")?, None)?;
 
     // Get latest tags and commits
-    let (latest_version, latest_pre, all_pre) = get_latest_tags(&repo)?;
-    let commits = get_commits(&repo, &latest_version)?;
-    print_summary(&latest_version, &latest_pre, &all_pre, &commits);
+    let all_tags = repo
+        .tag_names(None)?
+        .iter()
+        .filter_map(|name| Version::parse_v(name?).ok())
+        .collect::<Vec<_>>();
+
+    let latest_version = all_tags
+        .iter()
+        .filter(|version| version.pre.is_empty())
+        .max()
+        .map(|version| version.to_owned());
+
+    let all_pre = all_tags
+        .into_iter()
+        .filter(|version| !version.pre.is_empty())
+        .filter(|version| version.gt(&latest_version.to_owned().unwrap_or(Version::new(0, 0, 0))))
+        .collect::<Vec<_>>();
+
+    let latest_current_pre = repo
+        .describe(DescribeOptions::new().describe_tags())
+        .and_then(|describe| {
+            describe.format(Some(DescribeFormatOptions::new().abbreviated_size(0)))
+        })
+        .ok()
+        .and_then(|name: String| Version::parse_v(&name).ok())
+        .filter(|version| !version.pre.is_empty());
+
+    let commits = get_commits(&repo, &latest_version, &latest_current_pre)?;
+    print_summary(&latest_version, &latest_current_pre, &all_pre, &commits);
 
     // Generate proposal for new tag version
     let next_tag_proposal = match head.name().context("Could not get branch name")? {
         "refs/heads/main" | "refs/heads/master" => prompt_increment(latest_version),
-        _ => match latest_pre {
+        _ => match latest_current_pre {
             Some(version) => Ok(version),
             None => prompt_increment(latest_version),
         }
@@ -71,48 +97,18 @@ fn tagger() -> Result<()> {
     Ok(())
 }
 
-/// Obtains latest version, latest pre-version on current branch,
-/// and other pre-tags since the latest version
-fn get_latest_tags(repo: &Repository) -> Result<(Version, Option<Version>, Vec<Version>)> {
-    let all_versions = repo
-        .tag_names(None)?
-        .iter()
-        .filter_map(|name| Version::parse_v(name?).ok())
-        .collect::<Vec<_>>();
-
-    let latest_version = all_versions
-        .iter()
-        .filter(|version| version.pre.is_empty())
-        .max()
-        .map(|version| version.to_owned())
-        .unwrap_or(Version::new(0, 0, 0));
-
-    let all_pre = all_versions
-        .into_iter()
-        .filter(|version| !version.pre.is_empty())
-        .filter(|version| version.gt(&latest_version))
-        .collect::<Vec<_>>();
-
-    let latest_pre = {
-        let latest_pre_name = repo
-            .describe(DescribeOptions::new().describe_tags())?
-            .format(Some(DescribeFormatOptions::new().abbreviated_size(0)))?;
-        Version::parse_v(&latest_pre_name).ok()
-    }
-    .filter(|version| !version.pre.is_empty());
-    Ok((latest_version, latest_pre, all_pre))
-}
-
 /// Prints a summary of current tags
 fn print_summary(
-    latest_version: &Version,
+    latest_version: &Option<Version>,
     latest_pre: &Option<Version>,
     all_pre: &[Version],
     commit_messages: &[String],
 ) {
     let commit_message_style = Style::new().dim().italic();
     println!("\nLatest tags:");
-    print_tag(latest_version, "main");
+    if let Some(version) = latest_version {
+        print_tag(version, "main")
+    }
     if let Some(version) = latest_pre {
         print_tag(version, "current branch")
     }
@@ -142,16 +138,23 @@ fn prompt_next_tag(proposal: &Version) -> Result<Version> {
         .with_prompt("\nEnter new tag version")
         .default(proposal.print())
         .interact_text()?;
-
-    let new_version = Version::parse_v(&input)?;
-    Ok(new_version)
+    Version::parse_v(&input)
 }
 
 /// Determine message based on commit history
-fn get_commits(repo: &Repository, latest_version: &Version) -> Result<Vec<String>> {
+fn get_commits(
+    repo: &Repository,
+    latest_version: &Option<Version>,
+    latest_pre: &Option<Version>,
+) -> Result<Vec<String>> {
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
-    revwalk.hide_ref(latest_version.to_ref().as_str())?;
+    if let Some(version) = latest_version {
+        revwalk.hide_ref(&version.to_ref())?;
+    }
+    if let Some(version) = latest_pre {
+        revwalk.hide_ref(&version.to_ref())?;
+    }
     Ok(revwalk
         .filter_map(|reference| repo.find_commit(reference.ok()?).ok())
         .map(|commit| format!(" - {:.7} {}", commit.id(), commit.summary().unwrap_or("")))
@@ -166,15 +169,16 @@ fn edit_message(commits: &[String]) -> Result<String> {
 }
 
 /// Prompt user which part of the version to increment
-fn prompt_increment(version: Version) -> Result<Version> {
+fn prompt_increment(version: Option<Version>) -> Result<Version> {
     let items = SubVersion::VARIANTS;
     let selection = Select::with_theme(&ColorfulTheme::default())
         .items(items)
         .with_prompt("Subversion to increment")
         .default(2)
         .interact()?;
-    let new_version = version.increment_version(SubVersion::from_str(
-        items.get(selection).context("Invalid selection")?,
-    )?);
-    Ok(new_version)
+    Ok(version
+        .unwrap_or(Version::new(0, 0, 0))
+        .increment_version(SubVersion::from_str(
+            items.get(selection).context("Invalid selection")?,
+        )?))
 }
