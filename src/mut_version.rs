@@ -1,5 +1,4 @@
-use anyhow::Result;
-use regex::Regex;
+use anyhow::{Context, Result};
 use semver::{Prerelease, Version};
 use strum_macros::{EnumString, EnumVariantNames};
 use substring::Substring;
@@ -13,7 +12,9 @@ pub enum SubVersion {
 
 pub trait MutVersion {
     /// Increment the pre-version
-    fn increment_pretag(self, i: i32) -> Self;
+    fn increment_pretag(self, i: i32) -> Result<Self>
+    where
+        Self: Sized;
 
     /// Set the pre string of the version
     fn increment_version(self, part: SubVersion) -> Self;
@@ -22,7 +23,9 @@ pub trait MutVersion {
     fn set_pretag(self, i: i32) -> Self;
 
     /// Increments the selected subversion
-    fn resolve_collision(self, pre_tags: &[Version]) -> Self;
+    fn resolve_collision(self, pre_tags: &[Version]) -> Result<Self>
+    where
+        Self: Sized;
 
     /// Prints version string including leading `v`
     fn print(&self) -> String;
@@ -37,30 +40,33 @@ pub trait MutVersion {
 }
 
 impl MutVersion for Version {
-    fn increment_pretag(self, i: i32) -> Version {
-        let re = Regex::new(r"pre(\d+)").unwrap();
+    fn increment_pretag(self, i: i32) -> Result<Version> {
+        let re = lazy_regex::regex!(r"pre(\d+)");
         let version_str = self.pre.as_str();
 
         let new_pre_version = match version_str {
             "" => 0,
             _ => {
-                let cap = re.captures(version_str).unwrap();
-                let pre_tag_version: i32 = cap[1].parse().unwrap();
+                let cap = re
+                    .captures(version_str)
+                    .context("Failed to parse pre-version string")?;
+                let pre_tag_version: i32 = cap[1].parse()?;
                 pre_tag_version + i
             }
         };
-        self.set_pretag(new_pre_version)
+        Ok(self.set_pretag(new_pre_version))
     }
 
     fn set_pretag(mut self, i: i32) -> Version {
-        self.pre = Prerelease::new(format!("pre{}", i).as_str()).unwrap();
+        self.pre = Prerelease::new(format!("pre{}", i).as_str())
+            .expect("Could not set pre-version string");
         self
     }
 
-    fn resolve_collision(self, pre_tags: &[Version]) -> Self {
+    fn resolve_collision(self, pre_tags: &[Version]) -> Result<Self> {
         match pre_tags.contains(&self) {
-            true => self.increment_pretag(100).resolve_collision(pre_tags),
-            false => self,
+            true => self.increment_pretag(100)?.resolve_collision(pre_tags),
+            false => Ok(self),
         }
     }
 

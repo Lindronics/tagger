@@ -1,4 +1,4 @@
-mod version_operations;
+mod mut_version;
 
 use std::io::{self, Write};
 use std::process::Command;
@@ -9,12 +9,12 @@ use console::Style;
 use dialoguer::Confirm;
 use dialoguer::{theme::ColorfulTheme, Editor, Input, Select};
 use git2::{DescribeFormatOptions, DescribeOptions, Repository};
+use mut_version::{MutVersion, SubVersion};
 use semver::Version;
 use strum::VariantNames;
-use version_operations::{MutVersion, SubVersion};
 
-fn main() {
-    tagger().unwrap();
+fn main() -> anyhow::Result<()> {
+    tagger()
 }
 
 fn tagger() -> Result<()> {
@@ -24,11 +24,16 @@ fn tagger() -> Result<()> {
     println!("Fetching tags from remote...");
     let fetch_output = Command::new("git").arg("fetch").arg("--tags").output()?;
     io::stdout().write_all(&fetch_output.stdout)?;
-    assert!(fetch_output.status.success(), "Failed to fetch tags");
+    if !fetch_output.status.success() {
+        return Err(anyhow::format_err!(String::from_utf8(fetch_output.stderr)?)
+            .context("Failed to fetch tags"));
+    }
 
     // Check whether HEAD is a branch and get head commit
     let head = &repo.head()?;
-    assert!(head.is_branch(), "HEAD is not a branch");
+    if !head.is_branch() {
+        return Err(anyhow::format_err!("HEAD is not a branch"));
+    }
     let head_commit =
         repo.find_object(head.target().context("Could not get head commit")?, None)?;
 
@@ -43,7 +48,7 @@ fn tagger() -> Result<()> {
         .iter()
         .filter(|version| version.pre.is_empty())
         .max()
-        .map(|version| version.to_owned());
+        .cloned();
 
     let latest_current_pre = repo
         .describe(DescribeOptions::new().describe_tags())
@@ -63,15 +68,16 @@ fn tagger() -> Result<()> {
     );
 
     // Generate proposal for new tag version
-    let next_tag_proposal = match head.name().context("Could not get branch name")? {
+    let branch_name = head.name().context("Could not get branch name")?;
+    let next_tag_proposal = match branch_name {
         "refs/heads/main" | "refs/heads/master" => prompt_increment(latest_version),
         _ => match latest_current_pre {
             Some(version) => Ok(version),
             None => prompt_increment(latest_version),
-        }
-        .map(|version| version.increment_pretag(1)),
+        }?
+        .increment_pretag(1),
     }?
-    .resolve_collision(&all_tags);
+    .resolve_collision(&all_tags)?;
 
     // Determine new tag version and message
     let next_tag = prompt_next_tag(&next_tag_proposal)?;
@@ -90,7 +96,10 @@ fn tagger() -> Result<()> {
     if Confirm::new().with_prompt("\nPush tag?").interact()? {
         let push_output = Command::new("git").arg("push").arg("--tags").output()?;
         io::stdout().write_all(&push_output.stdout)?;
-        assert!(push_output.status.success(), "Failed to push to remote");
+        if !head.is_branch() {
+            return Err(anyhow::format_err!(String::from_utf8(fetch_output.stderr)?)
+                .context("Failed to push to remote"));
+        }
     };
 
     Ok(())
@@ -154,16 +163,20 @@ fn get_commit_history(repo: &Repository, all_tags: &[Version]) -> Result<Vec<Str
     }
     Ok(revwalk
         .filter_map(|reference| repo.find_commit(reference.ok()?).ok())
-        .map(|commit| format!(" - {:.7} {}", commit.id(), commit.summary().unwrap_or("")))
+        .map(|commit| {
+            format!(
+                " - {:.7} {}",
+                commit.id(),
+                commit.summary().unwrap_or_default()
+            )
+        })
         .collect::<Vec<String>>())
 }
 
 /// Open editor to allow editing tag message
 fn edit_message(commits: &[String]) -> Result<String> {
-    let message = String::from("release_notes:\n") + &commits.join("\n");
-    let result = Editor::new()
-        .edit(&message)?
-        .map(|message| message.replace(':', ""));
+    let message = String::from("release_notes:\n") + &commits.join("\n").replace(':', "");
+    let result = Editor::new().edit(&message)?;
     Ok(result.unwrap_or_default())
 }
 
