@@ -17,6 +17,7 @@ pub fn tagger(
     repo: &Repository,
     next_version: Option<Version>,
     interactive_editor: bool,
+    prompt_push: bool,
 ) -> Result<()> {
     println!("Fetching tags from remote...");
     let fetch_output = Command::new("git").arg("fetch").arg("--tags").output()?;
@@ -99,7 +100,7 @@ pub fn tagger(
     )?;
 
     // Push tag
-    if Confirm::new().with_prompt("\nPush tag?").interact()? {
+    if !prompt_push || Confirm::new().with_prompt("\nPush tag?").interact()? {
         let push_output = Command::new("git").arg("push").arg("--tags").output()?;
         io::stdout().write_all(&push_output.stdout)?;
         if !head.is_branch() {

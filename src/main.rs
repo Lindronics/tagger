@@ -16,6 +16,11 @@ struct Args {
     /// before creating the tag.
     #[clap(short, long)]
     interactive_editor: bool,
+
+    /// [DANGEROUS] Accept and push new tag without prompting
+    /// the user.
+    #[clap(short)]
+    yes: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -29,5 +34,5 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    tagger(&repo, next_version, args.interactive_editor)
+    tagger(&repo, next_version, args.interactive_editor, !args.yes)
 }
