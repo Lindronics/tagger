@@ -42,16 +42,16 @@ pub fn tagger(
         .filter_map(|name| Version::parse_v(name?).ok())
         .collect::<Vec<_>>();
 
-    let latest_version = all_tags
+    let latest_release = all_tags
         .iter()
         .filter(|version| version.pre.is_empty())
         .max()
         .cloned();
 
-    let latest_current_pre = repo
+    let latest_current_prerelease = repo
         .describe(DescribeOptions::new().describe_tags())
-        .and_then(|describe| {
-            describe.format(Some(DescribeFormatOptions::new().abbreviated_size(0)))
+        .and_then(|description| {
+            description.format(Some(DescribeFormatOptions::new().abbreviated_size(0)))
         })
         .ok()
         .and_then(|name: String| Version::parse_v(&name).ok())
@@ -59,25 +59,28 @@ pub fn tagger(
 
     let commit_history = get_commit_history(repo, &all_tags)?;
     print_summary(
-        &latest_version,
-        &latest_current_pre,
+        &latest_release,
+        &latest_current_prerelease,
         &all_tags,
         &commit_history,
     );
 
-    // Determine new tag version and message
+    // Determine new tag version
     let next_tag = match next_version {
-        Some(version) => version, // TODO
+        Some(version) => {
+            if all_tags.contains(&version) {
+                return Err(anyhow::format_err!("Version already exists"));
+            }
+            version
+        }
         None => {
             // Generate proposal for new tag version
             let branch_name = head.name().context("Could not get branch name")?;
             let next_tag_proposal = match branch_name {
-                "refs/heads/main" | "refs/heads/master" => prompt_increment(latest_version),
-                _ => match latest_current_pre {
-                    Some(version) => Ok(version),
-                    None => prompt_increment(latest_version),
-                }?
-                .increment_pretag(1),
+                "refs/heads/main" | "refs/heads/master" => prompt_increment(latest_release),
+                _ => latest_current_prerelease
+                    .unwrap_or(prompt_increment(latest_release)?)
+                    .increment_prerelease(1),
             }?
             .resolve_collision(&all_tags)?;
             prompt_next_tag(&next_tag_proposal)?
@@ -87,7 +90,7 @@ pub fn tagger(
     let mut message =
         String::from("release_notes:\n") + &commit_history.join("\n").replace(':', "");
     if interactive_editor {
-        message = edit_message(&message)?;
+        message = Editor::new().edit(&message)?.unwrap_or_default();
     }
 
     // Create new tag
@@ -103,7 +106,7 @@ pub fn tagger(
     if !prompt_push || Confirm::new().with_prompt("\nPush tag?").interact()? {
         let push_output = Command::new("git").arg("push").arg("--tags").output()?;
         io::stdout().write_all(&push_output.stdout)?;
-        if !head.is_branch() {
+        if !push_output.status.success() {
             return Err(anyhow::format_err!(String::from_utf8(fetch_output.stderr)?)
                 .context("Failed to push to remote"));
         }
@@ -114,27 +117,30 @@ pub fn tagger(
 
 /// Prints a summary of current tags
 fn print_summary(
-    latest_version: &Option<Version>,
-    latest_pre: &Option<Version>,
+    latest_release: &Option<Version>,
+    latest_prerelease: &Option<Version>,
     all_tags: &[Version],
     commit_messages: &[String],
 ) {
     let commit_message_style = Style::new().dim().italic();
+
     println!("\nLatest tags:");
-    if let Some(version) = latest_version {
+    if let Some(version) = latest_release {
         print_tag(version, "main")
     }
-    if let Some(version) = latest_pre {
+    if let Some(version) = latest_prerelease {
         print_tag(version, "current branch")
     }
-    println!("\nAll current pre-tags:");
+
+    println!("\nAll current prereleases:");
     for version in all_tags
         .iter()
         .filter(|version| !version.pre.is_empty())
-        .filter(|&version| version.gt(&latest_version.to_owned().unwrap_or(Version::new(0, 0, 0))))
+        .filter(|&version| version.gt(&latest_release.to_owned().unwrap_or(Version::new(0, 0, 0))))
     {
         print_tag(version, "")
     }
+
     println!("\nCommits since latest tag:");
     for message in commit_messages {
         println!("{}", commit_message_style.apply_to(message));
@@ -165,8 +171,8 @@ fn prompt_next_tag(proposal: &Version) -> Result<Version> {
 fn get_commit_history(repo: &Repository, all_tags: &[Version]) -> Result<Vec<String>> {
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
-    for version in all_tags {
-        revwalk.hide_ref(&version.to_ref())?;
+    for tag in all_tags {
+        revwalk.hide_ref(&tag.to_ref())?;
     }
     Ok(revwalk
         .filter_map(|reference| repo.find_commit(reference.ok()?).ok())
@@ -178,12 +184,6 @@ fn get_commit_history(repo: &Repository, all_tags: &[Version]) -> Result<Vec<Str
             )
         })
         .collect::<Vec<String>>())
-}
-
-/// Open editor to allow editing tag message
-fn edit_message(message: &str) -> Result<String> {
-    let result = Editor::new().edit(message)?;
-    Ok(result.unwrap_or_default())
 }
 
 /// Prompt user which part of the version to increment

@@ -11,18 +11,18 @@ pub enum SubVersion {
 }
 
 pub trait MutVersion {
-    /// Increment the pre-version
-    fn increment_pretag(self, i: i32) -> Result<Self>
+    /// Increments the pre-version
+    fn increment_prerelease(self, i: i32) -> Result<Self>
     where
         Self: Sized;
 
-    /// Set the pre string of the version
+    /// Increments the version
     fn increment_version(self, part: SubVersion) -> Self;
 
-    /// Checks whether version already exists and increments pre-version if necessary
+    /// Sets the pre-version
     fn set_pretag(self, i: i32) -> Self;
 
-    /// Increments the selected subversion
+    /// Increments pre-version until it does not conflict with existing releases
     fn resolve_collision(self, pre_tags: &[Version]) -> Result<Self>
     where
         Self: Sized;
@@ -40,7 +40,7 @@ pub trait MutVersion {
 }
 
 impl MutVersion for Version {
-    fn increment_pretag(self, i: i32) -> Result<Version> {
+    fn increment_prerelease(self, i: i32) -> Result<Version> {
         let re = lazy_regex::regex!(r"pre(\d+)");
         let version_str = self.pre.as_str();
 
@@ -65,7 +65,7 @@ impl MutVersion for Version {
 
     fn resolve_collision(self, pre_tags: &[Version]) -> Result<Self> {
         match pre_tags.contains(&self) {
-            true => self.increment_pretag(100)?.resolve_collision(pre_tags),
+            true => self.increment_prerelease(100)?.resolve_collision(pre_tags),
             false => Ok(self),
         }
     }
