@@ -1,8 +1,7 @@
 use anyhow::Context;
 use clap::Parser;
 use git2::Repository;
-use semver::Version;
-use tagger::{mut_version::MutVersion, tagger};
+use tagger::{tagger, version::Version};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -30,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     let repo = Repository::open(path)?;
 
     let next_version = match args.name {
-        Some(name) => Some(Version::parse_v(&name).context("Not a valid version string")?),
+        Some(name) => Some(Version::parse(&name).context("Not a valid version string")?),
         None => None,
     };
 
